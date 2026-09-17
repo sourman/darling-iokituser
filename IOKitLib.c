@@ -38,6 +38,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -110,6 +111,7 @@ gIOKitLibSerializeOptions = kIOCFSerializeToBinary;
 
 extern 	mach_port_t 	mach_task_self();
 const 	mach_port_t 	kIOMasterPortDefault = MACH_PORT_NULL;
+const 	mach_port_t 	kIOMainPortDefault = MACH_PORT_NULL;
 
 static mach_port_t
 __IOGetDefaultMasterPort()
@@ -162,7 +164,12 @@ IOMasterPort( mach_port_t bootstrapPort __unused, mach_port_t * masterPort )
 #ifdef DARLING
     if (bootstrapPort == MACH_PORT_NULL)
         bootstrapPort = bootstrap_port;
-    return bootstrap_look_up(bootstrapPort, "org.darlinghq.iokitd", masterPort);
+    {
+        kern_return_t kr = bootstrap_look_up(bootstrapPort, "org.darlinghq.iokitd", masterPort);
+        fprintf(stderr, "iokit_lookup_v1 look_up org.darlinghq.iokitd kr=%d port=%u\n", kr, masterPort ? *masterPort : 0);
+        fflush(stderr);
+        return kr;
+    }
 #endif
 
     host_port = mach_host_self();
@@ -884,6 +891,15 @@ IONotificationPortGetRunLoopSource(
     CFMachPortContext 	    context;
     Boolean		            cfReusedPort = false;
 
+    /* Chromium calls this on IORegisterForSystemPower's out-port even when
+     * Create/Register returned NULL (no IOPMrootDomain / iokitd). Apple
+     * never hits that; the member check is notify->source at +0x10. */
+    if (!notify) {
+        asl_log(NULL, NULL, ASL_LEVEL_ERR,
+                "iokit_notify_port_nil_v1 IONotificationPortGetRunLoopSource(NULL)\n");
+        return NULL;
+    }
+
     if (notify->source)
         return (notify->source);
     
@@ -963,6 +979,12 @@ void
 IONotificationPortSetDispatchQueue(IONotificationPortRef notify, dispatch_queue_t queue)
 {
 	dispatch_source_t dispatchSource;
+
+	if (!notify) {
+		asl_log(NULL, NULL, ASL_LEVEL_ERR,
+			"iokit_notify_port_nil_v1 IONotificationPortSetDispatchQueue(NULL)\n");
+		return;
+	}
 
 	if (notify->dispatchSource) {
 		dispatch_source_cancel(notify->dispatchSource);

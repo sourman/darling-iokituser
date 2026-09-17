@@ -301,6 +301,13 @@ failure_exit:
     if ( obj != IO_OBJECT_NULL) {
         IOObjectRelease(obj);
     }
+    /* Keep the notification port alive. Chromium ignores a NULL io_connect_t
+     * and still calls IONotificationPortGetRunLoopSource / SetDispatchQueue
+     * on *thePortRef. Destroying it here left that pointer NULL. */
+    if ( notify != NULL && thePortRef ) {
+        *thePortRef = notify;
+        notify = NULL;
+    }
     if ( notify != NULL) {
         IONotificationPortDestroy(notify);
     }
