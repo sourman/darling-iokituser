@@ -50,6 +50,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFMachPort.h>
+#include <string.h>
 
 #include <libkern/OSAtomic.h>
 #include <libkern/OSKextLibPrivate.h>
@@ -168,6 +169,24 @@ IOMasterPort( mach_port_t bootstrapPort __unused, mach_port_t * masterPort )
         kern_return_t kr = bootstrap_look_up(bootstrapPort, "org.darlinghq.iokitd", masterPort);
         fprintf(stderr, "iokit_lookup_v1 look_up org.darlinghq.iokitd kr=%d port=%u\n", kr, masterPort ? *masterPort : 0);
         fflush(stderr);
+        if (KERN_SUCCESS == kr && masterPort && *masterPort)
+        {
+            static dispatch_once_t versionOnce;
+            dispatch_once(&versionOnce, ^{
+#if IOKIT_SERVER_VERSION >= 20140421
+                kern_return_t vkr;
+                vkr = io_server_version(*masterPort, &gIOKitLibServerVersion);
+                if (KERN_SUCCESS != vkr)
+                    gIOKitLibServerVersion = 20160503ull;
+#endif
+                if (gIOKitLibServerVersion < 20140421)
+                    gIOKitLibSerializeOptions &= ~kIOCFSerializeToBinary;
+                fprintf(stderr, "iokit_lookup_v1 server_version=%llu serialize=0x%x\n",
+                        (unsigned long long)gIOKitLibServerVersion,
+                        (unsigned)gIOKitLibSerializeOptions);
+                fflush(stderr);
+            });
+        }
         return kr;
     }
 #endif
@@ -512,6 +531,19 @@ IOServiceGetMatchingService(
     else
 	masterPort = _masterPort;
 
+#ifdef DARLING
+    {
+        char cls[128];
+        CFStringRef c = (CFStringRef) CFDictionaryGetValue(matching, CFSTR(kIOProviderClassKey));
+        cls[0] = 0;
+        if (c)
+            CFStringGetCString(c, cls, sizeof(cls), kCFStringEncodingUTF8);
+        fprintf(stderr, "iokit_match_v1 GetMatchingService class=%s master=%u\n",
+                cls[0] ? cls : "(nil)", masterPort);
+        fflush(stderr);
+    }
+#endif
+
     data = IOCFSerialize( matching, gIOKitLibSerializeOptions );
     CFRelease( matching );
     if( !data)
@@ -557,6 +589,12 @@ IOServiceGetMatchingService(
    if (KERN_SUCCESS != kr)
 	service = MACH_PORT_NULL;
 
+#ifdef DARLING
+    fprintf(stderr, "iokit_match_v1 GetMatchingService kr=%d service=%u%s\n",
+            kr, service, service ? "" : " NIL");
+    fflush(stderr);
+#endif
+
     return( service );
 }
 
@@ -579,6 +617,19 @@ IOServiceGetMatchingServices(
 	masterPort = __IOGetDefaultMasterPort();
     else
 	masterPort = _masterPort;
+
+#ifdef DARLING
+    {
+        char cls[128];
+        CFStringRef c = (CFStringRef) CFDictionaryGetValue(matching, CFSTR(kIOProviderClassKey));
+        cls[0] = 0;
+        if (c)
+            CFStringGetCString(c, cls, sizeof(cls), kCFStringEncodingUTF8);
+        fprintf(stderr, "iokit_match_v1 GetMatchingServices class=%s master=%u\n",
+                cls[0] ? cls : "(nil)", masterPort);
+        fflush(stderr);
+    }
+#endif
 
     data = IOCFSerialize(matching, gIOKitLibSerializeOptions);
     CFRelease( matching );
@@ -620,6 +671,12 @@ IOServiceGetMatchingServices(
     CFRelease( data );
     if ((masterPort != MACH_PORT_NULL) && (masterPort != _masterPort))
 	mach_port_deallocate(mach_task_self(), masterPort);
+
+#ifdef DARLING
+    fprintf(stderr, "iokit_match_v1 GetMatchingServices kr=%d iter=%u\n",
+            kr, existing ? *existing : 0);
+    fflush(stderr);
+#endif
 
     return( kr );
 }
@@ -884,6 +941,12 @@ IONotificationPortDestroy(
 	IONotificationPortRelease(notify);
 }
 
+static void
+iokit_notify_dummy_perform(void *info)
+{
+    (void) info;
+}
+
 CFRunLoopSourceRef
 IONotificationPortGetRunLoopSource(
 	IONotificationPortRef	notify )
@@ -897,8 +960,15 @@ IONotificationPortGetRunLoopSource(
     if (!notify) {
         asl_log(NULL, NULL, ASL_LEVEL_ERR,
                 "iokit_notify_port_nil_v1 IONotificationPortGetRunLoopSource(NULL)\n");
+        fprintf(stderr, "iokit_notify_port_nil_v1 IONotificationPortGetRunLoopSource(NULL)\n");
+        fflush(stderr);
         return NULL;
     }
+
+    fprintf(stderr,
+            "iokit_notify_rls_v1 enter notify=%p source=%p cfmach=%p wake=%u\n",
+            notify, notify->source, notify->cfmachPort, notify->wakePort);
+    fflush(stderr);
 
     if (notify->source)
         return (notify->source);
@@ -911,8 +981,19 @@ IONotificationPortGetRunLoopSource(
 
     notify->cfmachPort = CFMachPortCreateWithPort(NULL, notify->wakePort,
         IODispatchCalloutFromCFMessage, &context, &cfReusedPort);
-    if (!notify->cfmachPort)
-        return NULL;
+    if (!notify->cfmachPort) {
+        /* Darling nil: Chrome CFRunLoopAddSource(NULL) then parks waiting
+         * for IOGeneralInterest that never has a listener. Keep a dummy
+         * source so add_interest first_interest is not the only wakeup. */
+        CFRunLoopSourceContext dummy = {0};
+        dummy.info = notify;
+        dummy.perform = iokit_notify_dummy_perform;
+        notify->source = CFRunLoopSourceCreate(NULL, 0, &dummy);
+        fprintf(stderr, "iokit_notify_rls_v1 cfmach=NULL dummy_source=%p\n",
+                notify->source);
+        fflush(stderr);
+        return notify->source;
+    }
     
     if (cfReusedPort) 
     {    
@@ -943,6 +1024,9 @@ IONotificationPortGetRunLoopSource(
     notify->source = CFMachPortCreateRunLoopSource(NULL, notify->cfmachPort, 0);
 
 exit:
+    fprintf(stderr, "iokit_notify_rls_v1 exit source=%p cfmach=%p reused=%d\n",
+            notify->source, notify->cfmachPort, (int)cfReusedPort);
+    fflush(stderr);
     return (notify->source);
 }
 
@@ -2484,6 +2568,46 @@ IORegistryEntryCreateCFProperties(
     return( *properties ? kIOReturnSuccess : kIOReturnInternalError );
 }
 
+#ifdef DARLING
+static int
+darling_iokit_is_pci_id_key(const char *key)
+{
+    if (!key)
+	return 0;
+    return (strcmp(key, "vendor-id") == 0 ||
+	    strcmp(key, "device-id") == 0 ||
+	    strcmp(key, "subsystem-vendor-id") == 0 ||
+	    strcmp(key, "subsystem-id") == 0 ||
+	    strcmp(key, "class-code") == 0 ||
+	    strcmp(key, "revision-id") == 0);
+}
+
+/* IOPCIFamily publishes these as OSData(4). iokitd used to send CFNumber. */
+static CFTypeRef
+darling_iokit_pci_id_as_data(const char *key, CFTypeRef type)
+{
+    uint32_t value = 0;
+    CFDataRef data;
+
+    if (!type || !darling_iokit_is_pci_id_key(key))
+	return type;
+    if (CFGetTypeID(type) == CFDataGetTypeID())
+	return type;
+    if (CFGetTypeID(type) != CFNumberGetTypeID())
+	return type;
+    if (!CFNumberGetValue((CFNumberRef)type, kCFNumberSInt32Type, &value))
+	return type;
+    data = CFDataCreate(kCFAllocatorDefault, (const UInt8 *)&value, sizeof(value));
+    if (!data)
+	return type;
+    CFRelease(type);
+    fprintf(stderr, "iokit_pci_id_cfdata_v1 key=%s coerced CFNumber->CFData u32=0x%x\n",
+	    key, value);
+    fflush(stderr);
+    return data;
+}
+#endif
+
 CFTypeRef
 IORegistryEntryCreateCFProperty(
 	io_registry_entry_t	entry,
@@ -2547,8 +2671,23 @@ if (!cStr) kr = kIOReturnError;
         kr = io_registry_entry_get_property(entry, (char *) cStr, &propertiesBuffer, &size);
     }
 
+#ifdef DARLING
+    char iokitPropKey[128];
+    iokitPropKey[0] = 0;
+    if (cStr)
+        snprintf(iokitPropKey, sizeof(iokitPropKey), "%s", cStr);
+#endif
     if (buffer) free(buffer);
+#ifdef DARLING
+    if (kr != kIOReturnSuccess) {
+        fprintf(stderr, "iokit_prop_v1 key=%s kr=%d type=NIL\n",
+                iokitPropKey[0] ? iokitPropKey : "(nil)", kr);
+        fflush(stderr);
+        return (NULL);
+    }
+#else
     if (kr != kIOReturnSuccess) return (NULL);
+#endif
 
     if (propertiesBuffer) {
         type = (CFMutableDictionaryRef) IOCFUnserializeWithSize(propertiesBuffer, size, allocator,
@@ -2569,6 +2708,22 @@ if (!cStr) kr = kIOReturnError;
 	    // free propertiesBuffer !
 	    vm_deallocate(mach_task_self(), (vm_address_t)propertiesBuffer, size);
     }
+
+#ifdef DARLING
+    type = darling_iokit_pci_id_as_data(iokitPropKey, type);
+    {
+        CFStringRef tname = type ? CFCopyTypeIDDescription(CFGetTypeID(type)) : NULL;
+        char tbuf[64];
+        tbuf[0] = 0;
+        if (tname)
+            CFStringGetCString(tname, tbuf, sizeof(tbuf), kCFStringEncodingUTF8);
+        fprintf(stderr, "iokit_prop_v1 key=%s kr=%d type=%s\n",
+                iokitPropKey[0] ? iokitPropKey : "(nil)", kr, type ? tbuf : "NIL");
+        fflush(stderr);
+        if (tname)
+            CFRelease(tname);
+    }
+#endif
 
     return( type );
 }

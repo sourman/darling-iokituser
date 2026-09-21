@@ -21,6 +21,7 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
 
 #include <mach/mach.h>
 #include <mach/mach_init.h>
@@ -273,7 +274,11 @@ io_connect_t IORegisterForSystemPower ( void * refcon,
      
     *root_notifier = IO_OBJECT_NULL;
 
+    fprintf(stderr, "iokit_power_v1 IORegisterForSystemPower enter\n");
+    fflush(stderr);
     notify = IONotificationPortCreate(MACH_PORT_NULL);
+    fprintf(stderr, "iokit_power_v1 IONotificationPortCreate notify=%p\n", notify);
+    fflush(stderr);
 
     obj = IORegistryEntryFromPath( IO_OBJECT_NULL,
                     kIOPowerPlane ":/IOPowerConnection/IOPMrootDomain");
@@ -294,6 +299,9 @@ io_connect_t IORegisterForSystemPower ( void * refcon,
     if ( kr == KERN_SUCCESS ) {
         // Successful exit case
         *thePortRef = notify;
+        fprintf(stderr, "iokit_power_v1 IORegisterForSystemPower ok fb=%u notify=%p notifier=%u\n",
+                fb, notify, *root_notifier);
+        fflush(stderr);
         return fb;
     }
     
