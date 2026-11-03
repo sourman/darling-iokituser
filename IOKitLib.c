@@ -884,6 +884,9 @@ IONotificationPortGetRunLoopSource(
     CFMachPortContext 	    context;
     Boolean		            cfReusedPort = false;
 
+    if (!notify)
+        return NULL;
+
     if (notify->source)
         return (notify->source);
     
