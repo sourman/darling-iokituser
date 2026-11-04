@@ -500,6 +500,18 @@ IOServiceGetMatchingService(
     if( !matching)
 	return( MACH_PORT_NULL);
 
+#ifdef DARLING
+    /*
+     * iokitd receives this on a dispatch mach-port source that does not wake,
+     * so the caller blocks in mach_msg forever. Chromium does this for
+     * IOPlatformExpertDevice on the main thread before it starts the GPU
+     * process. A miss is the same result the call would return if the
+     * registry had no match.
+     */
+    CFRelease(matching);
+    return MACH_PORT_NULL;
+#endif
+
     if (MACH_PORT_NULL == _masterPort)
 	masterPort = __IOGetDefaultMasterPort();
     else
