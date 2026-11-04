@@ -485,6 +485,148 @@ IOIteratorIsValid(
  * IOService
  */
 
+#ifdef DARLING
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+static mach_port_t darling_iosurface_service;
+
+static int
+darling_matching_is_iosurface(CFDictionaryRef matching)
+{
+    CFTypeRef value;
+
+    if (CFGetTypeID(matching) != CFDictionaryGetTypeID())
+	return 0;
+    value = CFDictionaryGetValue(matching, CFSTR("IONameMatch"));
+    if (value == NULL)
+	value = CFDictionaryGetValue(matching, CFSTR("IOProviderClass"));
+    if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID())
+	return 0;
+    return CFStringCompare((CFStringRef) value, CFSTR("IOSurfaceRoot"), 0) == 0;
+}
+
+static mach_port_t
+darling_iosurface_port(void)
+{
+    mach_port_t port;
+
+    if (darling_iosurface_service != MACH_PORT_NULL)
+	return darling_iosurface_service;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS)
+	return MACH_PORT_NULL;
+    if (mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS)
+	return MACH_PORT_NULL;
+    darling_iosurface_service = port;
+    return port;
+}
+
+/* Same layout as IOSurface.framework's _IOSurfaceObjectRetval. */
+struct darling_iosurface_plane {
+    uint64_t memoryOffset;
+    uint32_t bytesPerElement;
+    uint32_t width;
+    uint32_t height;
+    uint32_t bytesPerRow;
+};
+
+struct darling_iosurface_ret {
+    uint32_t surfaceID;
+    uint32_t pixelFormat;
+    uint64_t address;
+    uint32_t planeCount;
+    struct darling_iosurface_plane planes[1];
+};
+
+static kern_return_t
+darling_iosurface_lookup(uint32_t surfaceID, void *outputStruct, size_t *outputStructCntP)
+{
+    char name[64];
+    int fd;
+    struct {
+	uint32_t magic;
+	uint32_t id;
+	uint32_t width;
+	uint32_t height;
+	uint32_t bytesPerRow;
+	uint32_t bytesPerElement;
+	uint32_t pixelFormat;
+	uint32_t allocSize;
+    } header;
+    void *mapping;
+    size_t mapLength;
+    struct darling_iosurface_ret *ret;
+
+    if (outputStruct == NULL || outputStructCntP == NULL ||
+	*outputStructCntP < sizeof(*ret))
+	return KERN_INVALID_ARGUMENT;
+    snprintf(name, sizeof(name), "/darling-iosurf-%u", surfaceID);
+    fd = shm_open(name, O_RDWR, 0666);
+    if (fd < 0)
+	return KERN_FAILURE;
+    if (pread(fd, &header, sizeof(header), 0) != (ssize_t) sizeof(header) ||
+	header.magic != 0x46534F49 || header.id != surfaceID) {
+	close(fd);
+	return KERN_FAILURE;
+    }
+    mapLength = 4096u + header.allocSize;
+    mapping = mmap(NULL, mapLength, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (mapping == MAP_FAILED)
+	return KERN_FAILURE;
+    ret = outputStruct;
+    memset(ret, 0, sizeof(*ret));
+    ret->surfaceID = header.id;
+    ret->pixelFormat = header.pixelFormat;
+    ret->address = (uint64_t) ((uint8_t *) mapping + 4096);
+    ret->planeCount = 1;
+    ret->planes[0].bytesPerElement = header.bytesPerElement;
+    ret->planes[0].width = header.width;
+    ret->planes[0].height = header.height;
+    ret->planes[0].bytesPerRow = header.bytesPerRow;
+    *outputStructCntP = sizeof(*ret);
+    return KERN_SUCCESS;
+}
+
+static kern_return_t
+darling_iosurface_method(
+	uint32_t selector,
+	const uint64_t *input,
+	uint32_t inputCnt,
+	void *outputStruct,
+	size_t *outputStructCntP)
+{
+    uint32_t surfaceID;
+    mach_port_context_t context = 0;
+
+    switch (selector) {
+    case 2: /* lock */
+    case 3: /* unlock */
+    case 1: /* release */
+    case 14: /* increment use */
+    case 15: /* decrement use */
+	return KERN_SUCCESS;
+    case 4: /* lookup by id */
+	if (input == NULL || inputCnt < 1)
+	    return KERN_INVALID_ARGUMENT;
+	return darling_iosurface_lookup((uint32_t) input[0], outputStruct, outputStructCntP);
+    case 34: /* lookup by mach port */
+	if (input == NULL || inputCnt < 1)
+	    return KERN_INVALID_ARGUMENT;
+	surfaceID = (uint32_t) input[0];
+	if (mach_port_get_context(mach_task_self(), (mach_port_t) input[0], &context) == KERN_SUCCESS &&
+	    context != 0)
+	    surfaceID = (uint32_t) context;
+	return darling_iosurface_lookup(surfaceID, outputStruct, outputStructCntP);
+    default:
+	return KERN_NOT_SUPPORTED;
+    }
+}
+#endif
+
 io_service_t
 IOServiceGetMatchingService(
 	mach_port_t	_masterPort,
@@ -505,11 +647,16 @@ IOServiceGetMatchingService(
      * iokitd receives this on a dispatch mach-port source that does not wake,
      * so the caller blocks in mach_msg forever. Chromium does this for
      * IOPlatformExpertDevice on the main thread before it starts the GPU
-     * process. A miss is the same result the call would return if the
-     * registry had no match.
+     * process. Other names still miss immediately. IOSurfaceRoot is answered
+     * locally; its surfaces live in shm named /darling-iosurf-<id>.
      */
+    if (!darling_matching_is_iosurface(matching)) {
+	CFRelease(matching);
+	return MACH_PORT_NULL;
+    }
+    service = darling_iosurface_port();
     CFRelease(matching);
-    return MACH_PORT_NULL;
+    return service;
 #endif
 
     if (MACH_PORT_NULL == _masterPort)
@@ -1430,6 +1577,13 @@ IOServiceOpen(
     kern_return_t	kr;
     kern_return_t	result;
 
+#ifdef DARLING
+    if (service != MACH_PORT_NULL && service == darling_iosurface_service) {
+	*connect = service;
+	return KERN_SUCCESS;
+    }
+#endif
+
     kr = io_service_open_extended( service,
 	owningTask, type, NDR_record, NULL, 0, &result, connect );
 
@@ -1444,6 +1598,11 @@ IOServiceClose(
 	io_connect_t	connect )
 {
     kern_return_t	kr;
+
+#ifdef DARLING
+    if (connect != MACH_PORT_NULL && connect == darling_iosurface_service)
+	return KERN_SUCCESS;
+#endif
 
     kr = io_service_close( connect);
     IOObjectRelease( connect );
@@ -1789,6 +1948,12 @@ IOConnectCallMethod(
 	size_t		*outputStructCntP)	// In/Out
 {
     kern_return_t	        rtn;
+
+#ifdef DARLING
+    if (connection != MACH_PORT_NULL && connection == darling_iosurface_service)
+	return darling_iosurface_method(selector, input, inputCnt,
+		outputStruct, outputStructCntP);
+#endif
 
     void			*inb_input       = 0;
     mach_msg_type_number_t	 inb_input_size  = 0;
