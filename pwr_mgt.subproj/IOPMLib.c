@@ -266,51 +266,17 @@ io_connect_t IORegisterForSystemPower ( void * refcon,
                                         IOServiceInterestCallback callback,
                                         io_object_t * root_notifier )
 {
-    io_connect_t                fb = IO_OBJECT_NULL;
-    IONotificationPortRef       notify = NULL;
-    kern_return_t               kr;
-    io_service_t                obj = IO_OBJECT_NULL;
-     
-    *root_notifier = IO_OBJECT_NULL;
-
-    notify = IONotificationPortCreate(MACH_PORT_NULL);
-
-    obj = IORegistryEntryFromPath( IO_OBJECT_NULL,
-                    kIOPowerPlane ":/IOPowerConnection/IOPMrootDomain");
-
-    if( obj == IO_OBJECT_NULL) goto failure_exit;
-    
-    kr = IOServiceOpen( obj,mach_task_self(), 0, &fb);
-
-    if ( (kr != kIOReturnSuccess) || (fb == IO_OBJECT_NULL) )  {
-        goto failure_exit;
-    }
-
-    kr = IOServiceAddInterestNotification(
-                            notify,obj,kIOAppPowerStateInterest,
-                            callback,refcon,root_notifier);
-
-    IOObjectRelease(obj);
-    if ( kr == KERN_SUCCESS ) {
-        // Successful exit case
-        *thePortRef = notify;
-        return fb;
-    }
-    
-failure_exit:    
-    if ( obj != IO_OBJECT_NULL) {
-        IOObjectRelease(obj);
-    }
-    if ( notify != NULL) {
-        IONotificationPortDestroy(notify);
-    }
-    if ( fb != IO_OBJECT_NULL) {
-        IOServiceClose(fb);
-    }
-    if ( *root_notifier != IO_OBJECT_NULL) {
-        IOObjectRelease(*root_notifier);
-    }
-    
+    /*
+     * IOPMrootDomain is not registered. IORegistryEntryFromPath waits on
+     * iokitd, and Chromium blocks in that recv during startup. There is
+     * no power plane to subscribe to; return no connection.
+     */
+    (void) refcon;
+    (void) callback;
+    if (root_notifier)
+        *root_notifier = IO_OBJECT_NULL;
+    if (thePortRef)
+        *thePortRef = NULL;
     return IO_OBJECT_NULL;
 }
 
